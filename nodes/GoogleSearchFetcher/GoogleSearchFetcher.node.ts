@@ -25,6 +25,95 @@ interface SearchResult {
 	url: string;
 }
 
+/**
+ * Извлекает ключевую информацию из результатов поиска
+ */
+function smartExtractKeyInfo(searchResults: SearchResult[], userQuery: string, maxFacts: number = 5): KeyFact[] {
+	const queryKeywords = new Set(userQuery.toLowerCase().split(/\s+/).filter(word => word.length > 2));
+	const keyFacts: KeyFact[] = [];
+
+	for (const result of searchResults) {
+		const content = result.content || '';
+		
+		// Разбиваем на предложения
+		const sentences = content.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 0);
+		
+		// Оцениваем релевантность каждого предложения
+		for (const sentence of sentences) {
+			if (sentence.length < 20) continue; // Пропускаем короткие предложения
+			
+			// Подсчет пересечений с ключевыми словами запроса
+			const sentenceWords = new Set(sentence.toLowerCase().split(/\s+/));
+			const intersection = new Set([...queryKeywords].filter(x => sentenceWords.has(x)));
+			const relevanceScore = intersection.size;
+			
+			if (relevanceScore > 0) {
+				keyFacts.push({
+					text: sentence.length > 200 ? sentence.substring(0, 200) + '...' : sentence,
+					source: result.title || 'Unknown',
+					url: result.url || '',
+					relevance: relevanceScore
+				});
+			}
+		}
+	}
+
+	// Сортировка по релевантности и удаление дубликатов
+	const uniqueFacts = removeDuplicateFacts(keyFacts);
+	uniqueFacts.sort((a, b) => b.relevance - a.relevance);
+	
+	return uniqueFacts.slice(0, maxFacts);
+}
+
+/**
+ * Удаляет дублирующиеся факты на основе сходства текста
+ */
+function removeDuplicateFacts(facts: KeyFact[]): KeyFact[] {
+	const uniqueFacts: KeyFact[] = [];
+	
+	for (const fact of facts) {
+		const isDuplicate = uniqueFacts.some(existing => 
+			calculateTextSimilarity(fact.text, existing.text) > 0.7
+		);
+		
+		if (!isDuplicate) {
+			uniqueFacts.push(fact);
+		}
+	}
+	
+	return uniqueFacts;
+}
+
+/**
+ * Вычисляет сходство между двумя текстами (простая реализация)
+ */
+function calculateTextSimilarity(text1: string, text2: string): number {
+	const words1 = new Set(text1.toLowerCase().split(/\s+/));
+	const words2 = new Set(text2.toLowerCase().split(/\s+/));
+	
+	const intersection = new Set([...words1].filter(x => words2.has(x)));
+	const union = new Set([...words1, ...words2]);
+	
+	return intersection.size / union.size;
+}
+
+/**
+ * Очищает HTML и извлекает основной текст
+ */
+function extractCleanText(html: string): string {
+	const $ = cheerio.load(html);
+	
+	// Удаляем ненужные элементы
+	$('script, style, nav, footer, form, noscript, iframe, svg, header, aside, .advertisement, .ad').remove();
+	
+	// Приоритет основному контенту
+	const mainContent = $('main, article, .content, .post, .entry').first();
+	const text = mainContent.length > 0 ? mainContent.text() : $('body').text();
+	
+	// Очистка текста
+	return text.replace(/\s+/g, ' ').trim();
+}
+
 export class GoogleSearchFetcher implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Google Search Fetcher',
@@ -85,7 +174,7 @@ export class GoogleSearchFetcher implements INodeType {
 				type: 'number',
 				typeOptions: {
 					minValue: 1,
-					maxValue: 20,
+					maxValue: 100,
 				},
 				default: 5,
 				description: 'Maximum number of key facts to extract (only when key extraction is enabled)',
@@ -114,96 +203,6 @@ export class GoogleSearchFetcher implements INodeType {
 		],
 	};
 
-	/**
-	 * Извлекает ключевую информацию из результатов поиска
-	 */
-	private smartExtractKeyInfo(searchResults: SearchResult[], userQuery: string, maxFacts: number = 5): KeyFact[] {
-		const queryKeywords = new Set(userQuery.toLowerCase().split(/\s+/).filter(word => word.length > 2));
-		const keyFacts: KeyFact[] = [];
-
-		for (const result of searchResults) {
-			const content = result.content || '';
-			
-			// Разбиваем на предложения
-			const sentences = content.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 0);
-			
-			// Оцениваем релевантность каждого предложения
-			for (const sentence of sentences) {
-				if (sentence.length < 20) continue; // Пропускаем короткие предложения
-				
-				// Подсчет пересечений с ключевыми словами запроса
-				const sentenceWords = new Set(sentence.toLowerCase().split(/\s+/));
-				const intersection = new Set([...queryKeywords].filter(x => sentenceWords.has(x)));
-				const relevanceScore = intersection.size;
-				
-				if (relevanceScore > 0) {
-					keyFacts.push({
-						text: sentence.length > 200 ? sentence.substring(0, 200) + '...' : sentence,
-						source: result.title || 'Unknown',
-						url: result.url || '',
-						relevance: relevanceScore
-					});
-				}
-			}
-		}
-
-		// Сортировка по релевантности и удаление дубликатов
-		const uniqueFacts = this.removeDuplicateFacts(keyFacts);
-		uniqueFacts.sort((a, b) => b.relevance - a.relevance);
-		
-		return uniqueFacts.slice(0, maxFacts);
-	}
-
-	/**
-	 * Удаляет дублирующиеся факты на основе сходства текста
-	 */
-	private removeDuplicateFacts(facts: KeyFact[]): KeyFact[] {
-		const uniqueFacts: KeyFact[] = [];
-		
-		for (const fact of facts) {
-			const isDuplicate = uniqueFacts.some(existing => 
-				this.calculateTextSimilarity(fact.text, existing.text) > 0.7
-			);
-			
-			if (!isDuplicate) {
-				uniqueFacts.push(fact);
-			}
-		}
-		
-		return uniqueFacts;
-	}
-
-	/**
-	 * Вычисляет сходство между двумя текстами (простая реализация)
-	 */
-	private calculateTextSimilarity(text1: string, text2: string): number {
-		const words1 = new Set(text1.toLowerCase().split(/\s+/));
-		const words2 = new Set(text2.toLowerCase().split(/\s+/));
-		
-		const intersection = new Set([...words1].filter(x => words2.has(x)));
-		const union = new Set([...words1, ...words2]);
-		
-		return intersection.size / union.size;
-	}
-
-	/**
-	 * Очищает HTML и извлекает основной текст
-	 */
-	//@ts-ignore
-	private extractCleanText(html: string): string {
-		const $ = cheerio.load(html);
-		
-		// Удаляем ненужные элементы
-		$('script, style, nav, footer, form, noscript, iframe, svg, header, aside, .advertisement, .ad').remove();
-		
-		// Приоритет основному контенту
-		const mainContent = $('main, article, .content, .post, .entry').first();
-		const text = mainContent.length > 0 ? mainContent.text() : $('body').text();
-		
-		// Очистка текста
-		return text.replace(/\s+/g, ' ').trim();
-	}
-
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const results: INodeExecutionData[] = [];
 		const inputItems = this.getInputData();
@@ -226,33 +225,35 @@ export class GoogleSearchFetcher implements INodeType {
 				const searchResults: SearchResult[] = [];
 				const links: string[] = searchItems.map((item: any) => item.link);
 
-				// Получаем контент с каждого сайта
-				for (let j = 0; j < searchItems.length; j++) {
-					const item = searchItems[j];
+				// Получаем контент с каждого сайта параллельно
+				const fetchPromises = searchItems.map(async (item: any, j: number) => {
 					const link = item.link;
 					
 					try {
 						const htmlResponse = await axios.get(link, {
 							headers: { 'User-Agent': 'Mozilla/5.0 (n8n-bot)' },
-							timeout: 7000,
+							timeout: 5000, // Уменьшил до 5 секунд для быстрого отклика
 						});
 						
-						//@ts-ignore
-						const cleanText = this.extractCleanText(htmlResponse.data);
+						const cleanText = extractCleanText(htmlResponse.data);
 						
-						searchResults.push({
+						return {
 							content: cleanText,
 							title: item.title || `Result ${j + 1}`,
 							url: link
-						});
-					} catch (htmlError) {
-						searchResults.push({
+						};
+					} catch (htmlError: any) {
+						return {
 							content: `Failed to fetch or parse ${link}: ${htmlError.message}`,
 							title: `Error - ${item.title || `Result ${j + 1}`}`,
 							url: link
-						});
+						};
 					}
-				}
+				});
+
+				// Ждем завершения всех запросов параллельно
+				const fetchedResults = await Promise.all(fetchPromises);
+				searchResults.push(...fetchedResults);
 
 				// Подготавливаем результат в зависимости от настроек
 				let finalResult: any = {
@@ -264,8 +265,7 @@ export class GoogleSearchFetcher implements INodeType {
 
 				if (enableKeyExtraction) {
 					// Извлекаем ключевую информацию
-					//@ts-ignore
-					const keyFacts = this.smartExtractKeyInfo(searchResults, query, maxKeyFacts);
+					const keyFacts = smartExtractKeyInfo(searchResults, query, maxKeyFacts);
 					
 					finalResult = {
 						...finalResult,
@@ -273,7 +273,6 @@ export class GoogleSearchFetcher implements INodeType {
 						extractionMode: 'key_facts',
 						factsCount: keyFacts.length,
 						// Добавляем краткую сводку
-						//@ts-ignore
 						summary: keyFacts.slice(0, 3).map(fact => fact.text).join(' '),
 					};
 				} else {
@@ -300,7 +299,7 @@ export class GoogleSearchFetcher implements INodeType {
 					json: finalResult,
 				});
 
-			} catch (error) {
+			} catch (error: any) {
 				if (this.continueOnFail()) {
 					results.push({ 
 						json: { 

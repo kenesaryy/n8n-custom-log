@@ -40,7 +40,8 @@
       "dist/nodes/GoogleSearchFetcher/GoogleSearchFetcher.node.js",
       "dist/nodes/DuckDuckGoSearchFetcher/DuckDuckGoSearchFetcher.node.js",
       "dist/nodes/GoogleSerpApiFetcher/GoogleSerpApiFetcher.node.js",
-      "dist/nodes/HttpBin/HttpBin.node.js"
+      "dist/nodes/HttpBin/HttpBin.node.js",
+      "dist/nodes/ExtractUsefulPayload/ExtractUsefulPayload.node.js"
     ]
   },
   "devDependencies": {
@@ -59,7 +60,14 @@
   },
   "dependencies": {
     "@types/node": "^24.0.2",
-    "axios": "^1.9.0",
-    "cheerio": "^1.1.0"
+    "axios": "^1.10.0",
+    "cheerio": "^1.1.0",
+    "compromise": "^13.11.4",
+    "file-type": "^15.0.1",
+    "gpt-3-encoder": "^1.1.4",
+    "html-to-text": "^9.0.5",
+    "mammoth": "^1.9.1",
+    "pdf-parse": "^1.1.1",
+    "remove-markdown": "^0.3.0"
   }
 }

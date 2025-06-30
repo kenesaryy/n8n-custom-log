@@ -10,7 +10,29 @@ import {
 
 import axios from 'axios';
 import textract from 'textract';
-import { encode } from 'gpt-3-encoder';
+import { execFile } from 'child_process';
+import { writeFile, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+async function runExternalRanker(text: string, maxTokens: number) {
+  const tempPath = join(tmpdir(), `n8n_temp_rank_${Date.now()}.txt`);
+  await writeFile(tempPath, text, 'utf8');
+
+  return new Promise<{ text: string; tokenCount: number; sentenceCount: number }>((resolve, reject) => {
+    execFile('node', ['nodes/ExtractUsefulPayload/ranker.mjs', tempPath, String(maxTokens)], { encoding: 'utf8' }, async (err, stdout, stderr) => {
+      await rm(tempPath); // cleanup
+
+      if (err) return reject(new Error(stderr || err.message));
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve(parsed);
+      } catch (e) {
+        reject(new Error('Failed to parse ranker output'));
+      }
+    });
+  });
+}
 
 export class ExtractUsefulPayload implements INodeType {
   description: INodeTypeDescription = {
@@ -18,7 +40,7 @@ export class ExtractUsefulPayload implements INodeType {
     name: 'extractUsefulPayload',
     group: ['transform'],
     version: 1,
-    description: 'Extracts compressed useful text from file URL using textract',
+    description: 'Extracts compressed useful text from file URL using textract and transformers',
     defaults: {
       name: 'Extract Useful Payload',
     },
@@ -60,70 +82,37 @@ export class ExtractUsefulPayload implements INodeType {
         const maxTokens = this.getNodeParameter('maxTokens', i) as number;
         const token = this.getNodeParameter('token', i, false) as string;
 
-        // 1. Загружаем файл
         const response = await axios.get(url, {
           responseType: 'arraybuffer',
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
 
         const buffer = Buffer.from(response.data);
-
-        // 2. Определяем имя файла (важно для textract)
         const filename = url.split('/').pop() || 'file.txt';
 
-        // 3. Извлекаем текст с помощью textract
-        const rawText: string = await new Promise((resolve, reject) => {
-          textract.fromBufferWithName(filename, buffer, (err: unknown, text: string) => {
-            if (err) reject(err);
-            else resolve(text || '');
+        let rawText: string = '';
+        try {
+          rawText = await new Promise((resolve, reject) => {
+            textract.fromBufferWithName(filename, buffer, (err: unknown, text: string) => {
+              if (err || !text || !text.trim()) reject(err || new Error('Empty result'));
+              else resolve(text);
+            });
           });
-        });
-
-        console.log('Extracted text length:', rawText.length);
-
-        // 4. Фильтрация и очистка
-        const cleaned = rawText
-          .replace(/Figure\s?\d+.*|Chart\s?\d+.*|Image\s?\d+.*/gi, '')
-          .replace(/(\/[\w\-\.\/]+)+/g, '')
-          .replace(/[{<][^}>\n]+[}>]/g, '')
-          .replace(/^[^\.\n]{80,}$/gm, '')
-          .replace(/\s+/g, ' ')
-          .replace(/\n{2,}/g, '\n')
-          .trim();
-
-        // 5. Делим по предложениям (просто по точкам и пробелам)
-        const rawSentences = cleaned.split(/(?<=\.)\s+/g);
-        const sentences = rawSentences.filter((s) => {
-          const t = s.trim();
-          return (
-            t.length > 30 &&
-            t.length < 500 &&
-            /\w{3,}/.test(t) &&
-            !/copyright|terms|page \d+|privacy policy|cookie/i.test(t)
-          );
-        });
-
-        // 6. Обрезаем по токенам
-        const result: string[] = [];
-        let tokenCount = 0;
-
-        for (const sentence of sentences) {
-          const tokens = encode(sentence);
-          if (tokenCount + tokens.length > maxTokens) break;
-          result.push(sentence);
-          tokenCount += tokens.length;
+          console.log('✅ Textract успешно извлек текст.');
+        } catch (err) {
+          console.warn(`⚠️ Textract не справился, fallback к raw UTF-8.`);
+          rawText = buffer.toString('utf-8');
         }
 
-        const finalText = result.join(' ').trim();
+        const { text, tokenCount, sentenceCount } = await runExternalRanker(rawText, maxTokens);
 
         returnData.push({
           json: {
-            text: finalText,
+            text: text,
             metadata: {
               originalLength: rawText.length,
-              cleanedLength: cleaned.length,
-              sentenceCount: sentences.length,
               finalTokenCount: tokenCount,
+              sentenceCount,
               filename,
             },
           },
@@ -135,9 +124,8 @@ export class ExtractUsefulPayload implements INodeType {
             error: error.message,
             metadata: {
               originalLength: 0,
-              cleanedLength: 0,
-              sentenceCount: 0,
               finalTokenCount: 0,
+              sentenceCount: 0,
             },
           },
         });
